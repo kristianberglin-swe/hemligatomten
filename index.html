@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Hemliga tomten</title>
+<style>
+:root{color-scheme:light;--pine:#173e32;--red:#942e3b;--cream:#fcf5e8;--ink:#24332b}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--cream);font:1rem/1.55 system-ui,sans-serif}
+header{text-align:center;padding:3rem 1rem 2.7rem;background:var(--pine);color:var(--cream);border-bottom:6px solid #d5ab69}
+h1,h2{font-family:Georgia,serif;line-height:1.1}h1{font-size:clamp(2.5rem,9vw,5rem);margin:.6rem 0 0}h2{font-size:2rem;margin:.2rem 0 1rem}header span{font-size:2rem}
+main{max-width:49rem;margin:2rem auto;padding:0 1rem 3rem}section{background:#fffdf8;border:1px solid #e7dac5;border-radius:1rem;padding:clamp(1rem,5vw,2rem);box-shadow:0 10px 30px #59330710}
+label{display:block;margin:.7rem 0;font-weight:600}input:not([type=checkbox]),textarea,select{width:100%;font:inherit;color:inherit;background:white;border:1px solid #948575;border-radius:.45rem;padding:.55rem .65rem}textarea{resize:vertical;min-height:10rem}
+button{font:inherit;font-weight:650;border:1px solid var(--red);background:var(--red);color:#fff;border-radius:.5rem;padding:.55rem .85rem;cursor:pointer}button.secondary{color:var(--pine);background:white;border-color:var(--pine)}button:disabled{opacity:.6;cursor:wait}
+.actions{display:flex;gap:.6rem;flex-wrap:wrap;margin-block:1rem}.hint{color:#4b5a50}.error{color:#8c2633}#recipient{font:clamp(2rem,8vw,3.6rem)/1.1 Georgia,serif;color:var(--red);overflow-wrap:anywhere}
+ul{padding:0;list-style:none}li{display:flex;justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap;padding:.65rem 0;border-top:1px solid #eee3d2}
+[hidden]{display:none!important}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid #ab7740;outline-offset:2px}
+</style>
+</head>
+<body>
+<header><span aria-hidden="true">✦</span><h1>Hemliga tomten</h1></header>
+<main>
+<section id="organizer" hidden>
+<h2 id="mode">Arrangör</h2>
+<p id="demo-note" class="hint" hidden>Prova med tolv fiktiva deltagare. Testmejlen visas här på sidan.</p>
+<label id="admin-label">Arrangörskod <input id="admin" type="password" autocomplete="off"></label>
+<form id="setup">
+<div id="roster"><label for="people">Deltagare</label>
+<p class="hint" id="format">Skriv en deltagare per rad. Använd formatet <code>Namn, mejladress</code>.</p>
+<textarea id="people" aria-describedby="format" placeholder="Alex, alex@example.com"></textarea></div>
+<label>Presentbudget <input id="budget" maxlength="80" placeholder="Till exempel 150 kr"></label>
+<label>Datum för julklappsutdelning <input type="date" id="date"></label>
+<label><input type="checkbox" id="include"> Visa även mottagarens namn i mejlet</label>
+<button type="submit" id="draw">Lotta deltagarna</button>
+</form>
+<div id="manage" hidden>
+<h2>Utskick</h2>
+<div class="actions"><button id="send">Skicka väntande mejl</button><button class="secondary" id="new">Ny omgång</button></div>
+<ul id="status-list"></ul>
+</div>
+<div class="actions"><button class="secondary" id="resume" hidden>Hämta sparad omgång</button></div>
+<p id="message" role="status"></p>
+<div id="inbox" hidden>
+<h2>Testinkorg</h2>
+<label>Välj testmejl <select id="emails"></select></label>
+<button class="secondary" id="open-mail">Öppna testmejl</button>
+<p id="mail-text" style="white-space:pre-line"></p>
+<button id="demo-reveal" hidden>Öppna personlig testlänk</button>
+</div>
+</section>
+<section id="guest" hidden>
+<h2>Ditt hemliga uppdrag</h2>
+<button id="reveal">Visa vem du köper till</button>
+<p id="guest-message" role="status"></p>
+<div id="assignment" hidden><p>Du köper en julklapp till</p><p id="recipient"></p><p id="details"></p></div>
+<button class="secondary" id="demo-back" hidden>Tillbaka till testet</button>
+</section>
+</main>
+<script>
+/* Byt till din Supabase-funktions URL innan publicering. */
+const endpoint = "";
+function draw(participants) {
+  if (participants.length < 2) throw new Error('Minst två deltagare krävs.');
+  const order = participants.map((_, index) => index);
+  const random = new Uint32Array(1);
+  do {
+    for (let i = order.length - 1; i > 0; i--) {
+      const limit = Math.floor(2 ** 32 / (i + 1)) * (i + 1);
+      do { crypto.getRandomValues(random); } while (random[0] >= limit);
+      const j = random[0] % (i + 1);
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+  } while (order.some((recipient, giver) => recipient === giver));
+  return order.map(index => participants[index].name);
+}
+
+
+const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const email = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+const status = round => ({
+  people: round.details.people.map(({ id, name, sent }) => ({ id, name, sent: Boolean(sent) }))
+});
+
+async function authorized(provided, expected) {
+  if (!expected || expected.length < 32 || provided.length > 256) return false;
+  const encoder = new TextEncoder();
+  const hash = value => crypto.subtle.digest('SHA-256', encoder.encode(value));
+  const [a, b] = (await Promise.all([hash(provided), hash(expected)])).map(buf => new Uint8Array(buf));
+  return a.reduce((diff, byte, index) => diff | (byte ^ b[index]), 0) === 0;
+}
+
+function handler({ db, mail, adminKey, siteUrl }) {
+  const site = new URL(siteUrl);
+  if (site.protocol !== 'https:') throw new Error('SITE_URL måste använda HTTPS.');
+  const headers = {
+    'Access-Control-Allow-Origin': site.origin,
+    'Access-Control-Allow-Headers': 'content-type, x-tomten-admin',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Cache-Control': 'no-store',
+    'Vary': 'Origin'
+  };
+  const reply = (data, code = 200) => Response.json(data, { status: code, headers });
+  return async request => {
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
+    if (request.method !== 'POST') return reply({ error: 'Metoden stöds inte.' }, 405);
+    try {
+      const raw = await request.text();
+      if (raw.length > 16000) return reply({ error: 'För mycket data.' }, 413);
+      let input;
+      try { input = JSON.parse(raw); } catch { return reply({ error: 'Ogiltig begäran.' }, 400); }
+      if (!input || !uuid.test(input.round)) return reply({ error: 'Ogiltig omgång.' }, 400);
+
+      if (input.action === 'reveal') {
+        if (typeof input.token !== 'string' || !/^[a-f0-9]{64}$/.test(input.token)) {
+          return reply({ error: 'Den personliga länken är ogiltig.' }, 404);
+        }
+        const round = await db.get(input.round);
+        const person = round?.details.people.find(entry => entry.token === input.token);
+        return person ? reply({
+          recipient: person.recipient,
+          budget: round.details.budget,
+          date: round.details.date
+        }) : reply({ error: 'Den personliga länken är ogiltig.' }, 404);
+      }
+
+      if (!(await authorized(request.headers.get('x-tomten-admin') || '', adminKey))) {
+        return reply({ error: 'Kontrollera arrangörskoden.' }, 401);
+      }
+
+      let round = await db.get(input.round);
+      if (input.action === 'create') {
+        if (round) return reply(status(round));
+        if (!Array.isArray(input.people) || input.people.length < 2 || input.people.length > 24) {
+          return reply({ error: 'Ange 2–24 deltagare.' }, 400);
+        }
+        const people = input.people.map(person => ({
+          name: typeof person?.name === 'string' ? person.name.trim() : '',
+          email: typeof person?.email === 'string' ? person.email.trim().toLowerCase() : ''
+        }));
+        if (people.some(person => !person.name || person.name.length > 80 ||
+          person.email.length > 254 || !email.test(person.email)) ||
+          new Set(people.map(person => person.email)).size !== people.length ||
+          new Set(people.map(person => person.name.toLowerCase())).size !== people.length) {
+          return reply({ error: 'Ange unika namn och giltiga, unika mejladresser.' }, 400);
+        }
+        const recipients = draw(people);
+        const details = {
+          people: people.map((person, index) => ({
+            ...person,
+            id: crypto.randomUUID(),
+            token: Array.from(crypto.getRandomValues(new Uint8Array(32)),
+              byte => byte.toString(16).padStart(2, '0')).join(''),
+            recipient: recipients[index]
+          })),
+          budget: String(input.budget ?? '').slice(0, 80),
+          date: String(input.date ?? '').slice(0, 30),
+          includeName: input.includeName === true
+        };
+        await db.create({ id: input.round, details });
+        round = await db.get(input.round);
+        return reply(status(round));
+      }
+      if (!round) return reply({ error: 'Omgången finns inte.' }, 404);
+      if (input.action === 'status') return reply(status(round));
+      if (input.action !== 'send') return reply({ error: 'Okänd åtgärd.' }, 400);
+
+      const person = round.details.people.find(entry => entry.id === input.person);
+      if (!person) return reply({ error: 'Deltagaren finns inte.' }, 404);
+      if (person.sent && !input.resend) return reply({ sent: true });
+      if (!uuid.test(input.attempt)) return reply({ error: 'Ogiltigt utskicks-ID.' }, 400);
+      const link = new URL(site);
+      link.hash = new URLSearchParams({ round: round.id, token: person.token }).toString();
+      const lines = [
+        'Hej ' + person.name + '!',
+        'Här är din personliga länk till Hemliga tomten.',
+        link.href,
+        ...(round.details.includeName ? ['Du köper till ' + person.recipient + '.'] : []),
+        ...(round.details.budget ? ['Presentbudget: ' + round.details.budget] : []),
+        ...(round.details.date ? ['Julklappsutdelning: ' + round.details.date] : []),
+        'Behåll länken för dig själv.'
+      ];
+      // Initial retries reuse one key. An explicit resend has its own request ID.
+      const key = 'tomten/' + person.id + '/' + (input.resend ? input.attempt : 'initial');
+      await mail({ to: person.email, subject: 'Din personliga länk till Hemliga tomten', text: lines.join('\n\n') }, key);
+      if (!person.sent) await db.markSent(round.id, person.id);
+      return reply({ sent: true });
+    } catch {
+      return reply({ error: 'Åtgärden kunde inte slutföras. Försök igen.' }, 503);
+    }
+  };
+}
+
+const el = id => document.getElementById(id);
+const params = new URLSearchParams(location.hash.slice(1));
+const demo = !endpoint && !params.has('token');
+const adminDemo = 'test-' + crypto.randomUUID() + crypto.randomUUID();
+const examplePeople = ['Alex','Bea','Charlie','Dani','Eli','Frank','Gabriella','Hugo','Ida','Jamie','Kim','Lou']
+  .map((name, index) => ({ name, email: 'test' + (index + 1) + '@example.invalid' }));
+const demoDb = new Map();
+const mailBox = [];
+const simulate = demo ? handler({
+  adminKey: adminDemo,
+  siteUrl: 'https://test.example.invalid/',
+  db: {
+    get: async id => demoDb.get(id),
+    create: async round => { if (!demoDb.has(round.id)) demoDb.set(round.id, round); },
+    markSent: async (id, person) => { demoDb.get(id).details.people.find(entry => entry.id === person).sent = true; }
+  },
+  mail: async message => { mailBox.push(message); }
+}) : null;
+
+const storage = 'hemliga-tomten-round:' + endpoint;
+let round = demo ? null : localStorage.getItem(storage);
+let people = [];
+let busy = false;
+let activeGuest = params;
+const retryIds = new Map();
+
+async function api(action, fields, admin = false) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (admin) headers['x-tomten-admin'] = demo ? adminDemo : el('admin').value.trim();
+  const options = { method: 'POST', headers, body: JSON.stringify({ action, ...fields }), signal: AbortSignal.timeout(20000) };
+  const result = demo ? await simulate(new Request('https://test.example.invalid/', options)) :
+    await fetch(endpoint, options);
+  const data = await result.json();
+  if (!result.ok) throw new Error(data.error || 'Servern kunde inte svara.');
+  return data;
+}
+function notice(text, failed = false, target = 'message') {
+  el(target).textContent = text;
+  el(target).classList.toggle('error', failed);
+}
+async function run(action, target = 'message') {
+  if (busy) return;
+  busy = true;
+  const buttons = [...document.querySelectorAll('button')];
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    notice('Arbetar…', false, target);
+    await action();
+  } catch (error) {
+    notice(error instanceof TypeError || error instanceof SyntaxError || error.name === 'TimeoutError'
+      ? 'Sidan får inget svar från servern just nu. Försök igen om en stund.' : error.message, true, target);
+  } finally {
+    busy = false;
+    document.querySelectorAll('button').forEach(button => { button.disabled = false; });
+  }
+}
+function render(data) {
+  people = data.people;
+  el('setup').hidden = true;
+  el('resume').hidden = true;
+  el('manage').hidden = false;
+  el('send').hidden = people.every(person => person.sent);
+  el('status-list').replaceChildren(...people.map(person => {
+    const row = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = person.name + ' · ' + (person.sent ? 'Skickat' : 'Väntar på utskick');
+    row.append(label);
+    if (person.sent) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.textContent = 'Skicka igen';
+      button.onclick = () => run(async () => {
+        await send(person, true);
+        notice('Mejlet skickades igen till ' + person.name + '.');
+      });
+      row.append(button);
+    }
+    return row;
+  }));
+}
+async function send(person, resend = false) {
+  const attempt = retryIds.get(person.id) || crypto.randomUUID();
+  if (resend) retryIds.set(person.id, attempt);
+  await api('send', { round, person: person.id, resend, attempt }, true);
+  retryIds.delete(person.id);
+  if (demo) updateInbox();
+}
+function updateInbox() {
+  el('inbox').hidden = mailBox.length === 0;
+  el('emails').replaceChildren(...mailBox.map((mail, index) => new Option('Testmejl till ' + mail.to, String(index))));
+}
+function showGuest(link) {
+  activeGuest = link;
+  el('organizer').hidden = true;
+  el('guest').hidden = false;
+  el('reveal').hidden = false;
+  el('assignment').hidden = true;
+  el('recipient').textContent = '';
+  notice('', false, 'guest-message');
+  el('demo-back').hidden = !demo;
+}
+el('reveal').onclick = () => run(async () => {
+  if (!demo && !endpoint) throw new Error('Den här sidan är ännu inte ansluten till lottningen.');
+  const result = await api('reveal', { round: activeGuest.get('round'), token: activeGuest.get('token') });
+  el('recipient').textContent = result.recipient;
+  el('details').textContent = [result.budget && 'Budget ' + result.budget, result.date && 'Datum ' + result.date].filter(Boolean).join(' · ');
+  el('assignment').hidden = false;
+  el('reveal').hidden = true;
+  notice('', false, 'guest-message');
+}, 'guest-message');
+
+el('demo-back').onclick = () => {
+  el('guest').hidden = true;
+  el('organizer').hidden = false;
+  el('recipient').textContent = '';
+};
+el('setup').onsubmit = event => {
+  event.preventDefault();
+  run(async () => {
+    const entries = demo ? examplePeople : el('people').value.split('\n').filter(line => line.trim()).map(line => {
+      const comma = line.lastIndexOf(',');
+      return comma < 0 ? { name: line, email: '' } : { name: line.slice(0, comma), email: line.slice(comma + 1) };
+    });
+    round ||= crypto.randomUUID();
+    if (!demo) {
+      if (!el('admin').value.trim()) throw new Error('Ange arrangörskoden först.');
+      localStorage.setItem(storage, round);
+      el('resume').hidden = false;
+    }
+    render(await api('create', {
+      round, people: entries, budget: el('budget').value, date: el('date').value, includeName: el('include').checked
+    }, true));
+    notice('Lottningen är klar. Kontrollera deltagarna innan du skickar.');
+  });
+};
+el('resume').onclick = () => run(async () => {
+  render(await api('status', { round }, true));
+  notice('Omgången har hämtats.');
+});
+el('send').onclick = () => run(async () => {
+  let failures = 0;
+  for (const person of people.filter(entry => !entry.sent)) {
+    try { await send(person); } catch { failures++; }
+  }
+  render(await api('status', { round }, true));
+  notice(failures ? failures + ' utskick kunde inte bekräftas. Du kan försöka igen.' : 'Alla utskick är klara.', failures > 0);
+});
+el('new').onclick = () => {
+  if (!demo && !confirm('Starta en ny omgång? De tidigare länkarna fortsätter att fungera.')) return;
+  round = null;
+  if (!demo) localStorage.removeItem(storage);
+  mailBox.length = 0;
+  updateInbox();
+  el('mail-text').textContent = '';
+  el('demo-reveal').hidden = true;
+  el('manage').hidden = true;
+  el('setup').hidden = false;
+  notice('');
+};
+el('open-mail').onclick = () => {
+  const mail = mailBox[Number(el('emails').value)];
+  if (!mail) return;
+  const url = mail.text.match(/https:\/\/test\.example\.invalid\/#[^\s]+/)[0];
+  el('mail-text').textContent = mail.text.replace(url, 'Din personliga testlänk visas med knappen nedan.');
+  el('demo-reveal').hidden = false;
+  el('demo-reveal').onclick = () => showGuest(new URLSearchParams(new URL(url).hash.slice(1)));
+};
+if (params.has('token')) showGuest(params);
+else {
+  el('organizer').hidden = false;
+  el('demo-note').hidden = !demo;
+  el('admin-label').hidden = demo;
+  el('roster').hidden = demo;
+  el('resume').hidden = !round;
+  if (demo) el('mode').textContent = 'Testa lottningen';
+}
+</script>
+</body>
+</html>
