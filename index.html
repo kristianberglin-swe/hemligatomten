@@ -59,7 +59,7 @@ ul{padding:0;list-style:none}li{display:flex;justify-content:space-between;align
 </main>
 <script>
 /* Byt till din Supabase-funktions URL innan publicering. */
-const endpoint = "";
+const endpoint = 'https://ciibngcmbfqzovuwbohs.supabase.co/functions/v1/tomten';
 function draw(participants) {
   if (participants.length < 2) throw new Error('Minst två deltagare krävs.');
   const order = participants.map((_, index) => index);
